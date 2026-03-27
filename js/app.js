@@ -22,6 +22,8 @@ const campoValorTotal = document.getElementById("valor-total");
 const mensagemLogin = document.getElementById("mensagem-login");
 const painelErro = document.getElementById("painel-erro");
 const mensagemErroDetalhe = document.getElementById("mensagem-erro-detalhe");
+const telaCarregamento = document.getElementById("tela-carregamento");
+const botaoEntrar = document.getElementById("botao-entrar");
 
 // Guarda o total atual do carrinho enquanto a pagina estiver aberta.
 let valorTotal = 0;
@@ -96,6 +98,21 @@ function limparErroInterface() {
   }
 }
 
+function alternarCarregamentoLogin(estaCarregando) {
+  // Controla uma tela de transicao curta enquanto o login esta em andamento.
+  if (telaCarregamento) {
+    telaCarregamento.classList.toggle("oculto", !estaCarregando);
+  }
+
+  // Evita multiplos cliques no botao enquanto a autenticacao acontece.
+  if (botaoEntrar) {
+    botaoEntrar.disabled = estaCarregando;
+    botaoEntrar.textContent = estaCarregando ? "Entrando..." : "Entrar";
+    botaoEntrar.style.opacity = estaCarregando ? "0.8" : "1";
+    botaoEntrar.style.cursor = estaCarregando ? "wait" : "pointer";
+  }
+}
+
 function inicializarSupabase() {
   // Se o script externo do Supabase nao carregou, mostramos um erro amigavel em vez de quebrar o app.
   if (!window.supabase || typeof window.supabase.createClient !== "function") {
@@ -159,8 +176,8 @@ function renderizarItem(item) {
       <button type="button" class="carrinho__acao carrinho__acao--adicionar" data-acao="adicionar-um" data-id="${item.id}">
         +1
       </button>
-      <button type="button" class="carrinho__acao carrinho__acao--remover" data-acao="remover" data-id="${item.id}" data-nome="${item.produto_nome}">
-        Remover
+      <button type="button" class="carrinho__acao carrinho__acao--remover" data-acao="remover-um" data-id="${item.id}" data-nome="${item.produto_nome}">
+        -1
       </button>
     </div>
   `;
@@ -291,6 +308,9 @@ async function fazerLogin() {
   }
 
   try {
+    // Exibe uma transicao visual curta para suavizar a entrada no sistema.
+    alternarCarregamentoLogin(true);
+
     // Envia email e senha para o Supabase autenticar.
     const { error } = await supabaseClient.auth.signInWithPassword({
       email,
@@ -299,15 +319,20 @@ async function fazerLogin() {
 
     // Se o Supabase retornar erro, mostramos a mensagem na interface.
     if (error) {
+      alternarCarregamentoLogin(false);
       mostrarErroInterface(traduzirMensagemErro(error, "login"));
       return;
     }
+
+    // Mantem a tela por um instante para a transicao parecer mais natural.
+    await new Promise((resolve) => setTimeout(resolve, 450));
 
     // Se der certo, o usuario vai para a tela do carrinho.
     window.location.href = "carrinho.html";
   } catch (error) {
     // Captura falhas inesperadas e exibe para o usuario.
     console.error("Erro inesperado no login:", error);
+    alternarCarregamentoLogin(false);
     mostrarErroInterface(traduzirMensagemErro(error, "login"));
   }
 }
@@ -481,24 +506,49 @@ async function adicionarUmaUnidade(itemId) {
   await carregarCarrinho();
 }
 
-async function removerItem(itemId, nomeProduto) {
-  // Pede confirmacao antes de excluir o item, como solicitado na interface.
-  const confirmouRemocao = window.confirm(`Deseja realmente remover "${nomeProduto}" do carrinho?`);
+async function removerUmaUnidade(itemId, nomeProduto) {
+  // Remove apenas uma unidade do produto e so confirma quando ele vai sumir do carrinho.
+  limparErroInterface();
 
-  if (!confirmouRemocao) {
+  const { data: item, error } = await supabaseClient
+    .from("carrinho_itens")
+    .select("*")
+    .eq("id", itemId)
+    .single();
+
+  if (error) {
+    mostrarErroInterface(`Erro ao localizar item: ${error.message}`);
     return;
   }
 
-  limparErroInterface();
+  const quantidadeAtual = Number(item.quantidade);
 
-  const { error } = await supabaseClient
-    .from("carrinho_itens")
-    .delete()
-    .eq("id", itemId);
+  if (quantidadeAtual <= 1) {
+    const confirmouRemocao = window.confirm(`Deseja realmente remover "${nomeProduto}" do carrinho?`);
 
-  if (error) {
-    mostrarErroInterface(`Erro ao remover item: ${error.message}`);
-    return;
+    if (!confirmouRemocao) {
+      return;
+    }
+
+    const { error: erroRemocao } = await supabaseClient
+      .from("carrinho_itens")
+      .delete()
+      .eq("id", itemId);
+
+    if (erroRemocao) {
+      mostrarErroInterface(`Erro ao remover item: ${erroRemocao.message}`);
+      return;
+    }
+  } else {
+    const { error: erroAtualizacao } = await supabaseClient
+      .from("carrinho_itens")
+      .update({ quantidade: quantidadeAtual - 1 })
+      .eq("id", itemId);
+
+    if (erroAtualizacao) {
+      mostrarErroInterface(`Erro ao atualizar item: ${erroAtualizacao.message}`);
+      return;
+    }
   }
 
   await carregarCarrinho();
@@ -524,8 +574,8 @@ function configurarAcoesCarrinho() {
       return;
     }
 
-    if (botaoAcao.dataset.acao === "remover") {
-      await removerItem(itemId, botaoAcao.dataset.nome);
+    if (botaoAcao.dataset.acao === "remover-um") {
+      await removerUmaUnidade(itemId, botaoAcao.dataset.nome);
     }
   });
 }

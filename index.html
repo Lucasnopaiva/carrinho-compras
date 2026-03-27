@@ -12,6 +12,13 @@
 </head>
 
 <body class="pagina-login">
+  <section id="tela-carregamento" class="tela-carregamento oculto" aria-live="polite" aria-label="Carregando">
+    <div class="tela-carregamento__caixa">
+      <span class="tela-carregamento__spinner"></span>
+      <p class="tela-carregamento__texto">Entrando na sua conta...</p>
+    </div>
+  </section>
+
   <section id="login-area" class="login-card">
     <h1 class="login-titulo">Acesse sua conta</h1>
     <p class="login-texto">Entre para abrir seu carrinho e continuar as compras.</p>
@@ -19,7 +26,7 @@
     <input type="email" id="email" placeholder="Seu email">
     <input type="password" id="senha" placeholder="Sua senha">
 
-    <button type="button" class="botao-form botao-adicionar" onclick="fazerLogin()">Entrar</button>
+    <button type="button" id="botao-entrar" class="botao-form botao-adicionar" onclick="fazerLogin()">Entrar</button>
     <p id="mensagem-login" class="mensagem-login"></p>
     <section id="painel-erro" class="painel-erro oculto">
       <h2 class="painel-erro__titulo">Erro encontrado</h2>
