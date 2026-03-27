@@ -30,6 +30,42 @@ let valorTotal = 0;
 // Usamos o nome "supabaseClient" para nao entrar em conflito com o objeto global "supabase" da biblioteca.
 let supabaseClient = null;
 
+function traduzirMensagemErro(error, contexto = "geral") {
+  // Converte mensagens tecnicas do Supabase em textos mais claros para o usuario.
+  const mensagemOriginal = error?.message?.toLowerCase() || "";
+  const codigoErro = error?.code || "";
+
+  if (mensagemOriginal.includes("invalid login credentials")) {
+    return "Email ou senha incorretos.";
+  }
+
+  if (mensagemOriginal.includes("email not confirmed")) {
+    return "Confirme seu email antes de entrar.";
+  }
+
+  if (mensagemOriginal.includes("invalid email")) {
+    return "Email invalido. Verifique o endereco digitado.";
+  }
+
+  if (mensagemOriginal.includes("password should be at least")) {
+    return "A senha informada nao atende aos requisitos minimos.";
+  }
+
+  if (mensagemOriginal.includes("network") || mensagemOriginal.includes("fetch")) {
+    return "Nao foi possivel conectar ao servidor. Verifique sua internet.";
+  }
+
+  if (codigoErro === "over_email_send_rate_limit" || mensagemOriginal.includes("rate limit")) {
+    return "Muitas tentativas em pouco tempo. Aguarde um instante e tente novamente.";
+  }
+
+  if (contexto === "login") {
+    return "Nao foi possivel entrar. Verifique seus dados e tente novamente.";
+  }
+
+  return "Ocorreu um erro inesperado. Tente novamente.";
+}
+
 function mostrarErroInterface(mensagem) {
   // Mostra uma caixa de erro visual na tela, se ela existir na pagina atual.
   if (painelErro && mensagemErroDetalhe) {
@@ -98,7 +134,12 @@ function atualizarTotal() {
   campoValorTotal.textContent = `R$${valorTotal}`;
 }
 
-function renderizarItem(nome, valor, quantidade) {
+function criarChaveProduto(nome, valor) {
+  // Monta uma chave unica para identificar produtos repetidos no carrinho.
+  return `${nome}::${valor}`;
+}
+
+function renderizarItem(item) {
   // Evita erro se esta funcao for chamada fora da pagina do carrinho.
   if (!listaProdutos) {
     return;
@@ -107,10 +148,93 @@ function renderizarItem(nome, valor, quantidade) {
   // Cria um bloco visual para representar o item.
   const itemCarrinho = document.createElement("section");
   itemCarrinho.className = "carrinho__produtos__produto";
-  itemCarrinho.innerHTML = `<span class="texto-azul">${quantidade}x</span> ${nome} <span class="texto-azul">R$${valor}</span>`;
+  itemCarrinho.innerHTML = `
+    <div class="carrinho__produto__info">
+      <span>
+        <span class="texto-azul">${item.quantidade}x</span> ${item.produto_nome}
+        <span class="texto-azul">R$${item.produto_valor}</span>
+      </span>
+    </div>
+    <div class="carrinho__produto__acoes">
+      <button type="button" class="carrinho__acao carrinho__acao--adicionar" data-acao="adicionar-um" data-id="${item.id}">
+        +1
+      </button>
+      <button type="button" class="carrinho__acao carrinho__acao--remover" data-acao="remover" data-id="${item.id}" data-nome="${item.produto_nome}">
+        Remover
+      </button>
+    </div>
+  `;
 
   // Adiciona o item criado na lista visivel.
   listaProdutos.appendChild(itemCarrinho);
+}
+
+function consolidarItensCarrinho(itens) {
+  // Junta produtos iguais para evitar linhas duplicadas na interface e no banco.
+  const itensAgrupados = new Map();
+
+  itens.forEach((item) => {
+    const chaveProduto = criarChaveProduto(item.produto_nome, item.produto_valor);
+    const itemExistente = itensAgrupados.get(chaveProduto);
+
+    if (!itemExistente) {
+      itensAgrupados.set(chaveProduto, { ...item, quantidade: Number(item.quantidade) });
+      return;
+    }
+
+    itemExistente.quantidade += Number(item.quantidade);
+    itemExistente.idsExtras.push(item.id);
+  });
+
+  return Array.from(itensAgrupados.values()).map((item) => ({
+    ...item,
+    idsExtras: item.idsExtras || [],
+  }));
+}
+
+async function normalizarItensDuplicados(usuarioId) {
+  // Busca os itens do usuario e consolida produtos iguais em uma unica linha no banco.
+  const { data, error } = await supabaseClient
+    .from("carrinho_itens")
+    .select("*")
+    .eq("user_id", usuarioId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`Erro ao buscar itens do carrinho: ${error.message}`);
+  }
+
+  const itensAgrupados = consolidarItensCarrinho(
+    data.map((item) => ({
+      ...item,
+      idsExtras: [],
+    }))
+  );
+
+  for (const item of itensAgrupados) {
+    if (item.idsExtras.length > 0) {
+      // Atualiza o primeiro registro com a quantidade final e apaga os duplicados antigos.
+      const { error: erroAtualizacao } = await supabaseClient
+        .from("carrinho_itens")
+        .update({ quantidade: item.quantidade })
+        .eq("id", item.id);
+
+      if (erroAtualizacao) {
+        throw new Error(`Erro ao consolidar item "${item.produto_nome}": ${erroAtualizacao.message}`);
+      }
+
+      const { error: erroRemocao } = await supabaseClient
+        .from("carrinho_itens")
+        .delete()
+        .in("id", item.idsExtras);
+
+      if (erroRemocao) {
+        throw new Error(`Erro ao remover duplicatas de "${item.produto_nome}": ${erroRemocao.message}`);
+      }
+    }
+  }
+
+  return itensAgrupados.map(({ idsExtras, ...item }) => item);
 }
 
 function resetarCarrinhoNaTela() {
@@ -175,7 +299,7 @@ async function fazerLogin() {
 
     // Se o Supabase retornar erro, mostramos a mensagem na interface.
     if (error) {
-      mostrarErroInterface(`Erro no login: ${error.message}`);
+      mostrarErroInterface(traduzirMensagemErro(error, "login"));
       return;
     }
 
@@ -184,7 +308,7 @@ async function fazerLogin() {
   } catch (error) {
     // Captura falhas inesperadas e exibe para o usuario.
     console.error("Erro inesperado no login:", error);
-    mostrarErroInterface(`Erro inesperado no login: ${error.message}`);
+    mostrarErroInterface(traduzirMensagemErro(error, "login"));
   }
 }
 
@@ -222,26 +346,70 @@ async function adicionar() {
   const { nome, valor } = extrairDadosProduto(campoProduto.value);
 
   try {
-    // Insere o item na tabela do carrinho no Supabase.
-    const { error } = await supabaseClient.from("carrinho_itens").insert([
-      {
-        user_id: usuario.id,
-        produto_nome: nome,
-        produto_valor: valor,
-        quantidade,
-      },
-    ]);
+    // Verifica se esse produto ja existe para somar a quantidade em vez de criar outra linha.
+    const { data: itensExistentes, error: erroBusca } = await supabaseClient
+      .from("carrinho_itens")
+      .select("*")
+      .eq("user_id", usuario.id)
+      .eq("produto_nome", nome)
+      .eq("produto_valor", valor)
+      .order("created_at", { ascending: true });
 
-    // Se o banco acusar erro, mostramos na interface.
-    if (error) {
-      mostrarErroInterface(`Erro ao salvar item: ${error.message}`);
+    if (erroBusca) {
+      mostrarErroInterface(`Erro ao buscar item existente: ${erroBusca.message}`);
       return;
     }
 
-    // Atualiza a parte visual do carrinho.
-    renderizarItem(nome, valor, quantidade);
-    valorTotal += quantidade * valor;
-    atualizarTotal();
+    if (itensExistentes.length > 0) {
+      // Se o item ja existir, atualizamos a linha principal e limpamos duplicatas antigas.
+      const itemPrincipal = itensExistentes[0];
+      const quantidadeAtualizada = itensExistentes.reduce(
+        (total, item) => total + Number(item.quantidade),
+        quantidade
+      );
+
+      const { error: erroAtualizacao } = await supabaseClient
+        .from("carrinho_itens")
+        .update({ quantidade: quantidadeAtualizada })
+        .eq("id", itemPrincipal.id);
+
+      if (erroAtualizacao) {
+        mostrarErroInterface(`Erro ao atualizar item: ${erroAtualizacao.message}`);
+        return;
+      }
+
+      const idsDuplicados = itensExistentes.slice(1).map((item) => item.id);
+
+      if (idsDuplicados.length > 0) {
+        const { error: erroRemocao } = await supabaseClient
+          .from("carrinho_itens")
+          .delete()
+          .in("id", idsDuplicados);
+
+        if (erroRemocao) {
+          mostrarErroInterface(`Erro ao limpar itens duplicados: ${erroRemocao.message}`);
+          return;
+        }
+      }
+    } else {
+      // Se for um produto novo, inserimos normalmente no banco.
+      const { error: erroInsercao } = await supabaseClient.from("carrinho_itens").insert([
+        {
+          user_id: usuario.id,
+          produto_nome: nome,
+          produto_valor: valor,
+          quantidade,
+        },
+      ]);
+
+      if (erroInsercao) {
+        mostrarErroInterface(`Erro ao salvar item: ${erroInsercao.message}`);
+        return;
+      }
+    }
+
+    // Recarrega o carrinho para refletir o valor total e as acoes de cada item.
+    await carregarCarrinho();
     campoQuantidade.value = "";
   } catch (error) {
     // Trata falhas inesperadas sem quebrar a pagina.
@@ -268,22 +436,12 @@ async function carregarCarrinho() {
   resetarCarrinhoNaTela();
 
   try {
-    // Busca todos os itens do usuario atual.
-    const { data, error } = await supabaseClient
-      .from("carrinho_itens")
-      .select("*")
-      .eq("user_id", usuario.id)
-      .order("created_at", { ascending: true });
-
-    // Se a busca falhar, mostramos o erro.
-    if (error) {
-      mostrarErroInterface(`Erro ao carregar carrinho: ${error.message}`);
-      return;
-    }
+    // Normaliza itens repetidos antes de desenhar a lista para manter o carrinho consistente.
+    const itensCarrinho = await normalizarItensDuplicados(usuario.id);
 
     // Renderiza cada item recebido e recalcula o total.
-    data.forEach((item) => {
-      renderizarItem(item.produto_nome, item.produto_valor, item.quantidade);
+    itensCarrinho.forEach((item) => {
+      renderizarItem(item);
       valorTotal += Number(item.produto_valor) * item.quantidade;
     });
 
@@ -293,6 +451,83 @@ async function carregarCarrinho() {
     console.error("Erro inesperado ao carregar carrinho:", error);
     mostrarErroInterface(`Erro inesperado ao carregar carrinho: ${error.message}`);
   }
+}
+
+async function adicionarUmaUnidade(itemId) {
+  // Adiciona apenas uma unidade a um item ja existente no carrinho.
+  limparErroInterface();
+
+  const { data: item, error } = await supabaseClient
+    .from("carrinho_itens")
+    .select("*")
+    .eq("id", itemId)
+    .single();
+
+  if (error) {
+    mostrarErroInterface(`Erro ao localizar item: ${error.message}`);
+    return;
+  }
+
+  const { error: erroAtualizacao } = await supabaseClient
+    .from("carrinho_itens")
+    .update({ quantidade: Number(item.quantidade) + 1 })
+    .eq("id", itemId);
+
+  if (erroAtualizacao) {
+    mostrarErroInterface(`Erro ao adicionar quantidade: ${erroAtualizacao.message}`);
+    return;
+  }
+
+  await carregarCarrinho();
+}
+
+async function removerItem(itemId, nomeProduto) {
+  // Pede confirmacao antes de excluir o item, como solicitado na interface.
+  const confirmouRemocao = window.confirm(`Deseja realmente remover "${nomeProduto}" do carrinho?`);
+
+  if (!confirmouRemocao) {
+    return;
+  }
+
+  limparErroInterface();
+
+  const { error } = await supabaseClient
+    .from("carrinho_itens")
+    .delete()
+    .eq("id", itemId);
+
+  if (error) {
+    mostrarErroInterface(`Erro ao remover item: ${error.message}`);
+    return;
+  }
+
+  await carregarCarrinho();
+}
+
+function configurarAcoesCarrinho() {
+  // Usa delegacao de eventos para tratar os botoes criados dinamicamente na lista.
+  if (!listaProdutos) {
+    return;
+  }
+
+  listaProdutos.addEventListener("click", async (evento) => {
+    const botaoAcao = evento.target.closest("[data-acao]");
+
+    if (!botaoAcao) {
+      return;
+    }
+
+    const itemId = Number(botaoAcao.dataset.id);
+
+    if (botaoAcao.dataset.acao === "adicionar-um") {
+      await adicionarUmaUnidade(itemId);
+      return;
+    }
+
+    if (botaoAcao.dataset.acao === "remover") {
+      await removerItem(itemId, botaoAcao.dataset.nome);
+    }
+  });
 }
 
 async function limpar() {
@@ -393,6 +628,9 @@ async function inicializarPagina() {
         window.location.href = "index.html";
         return;
       }
+
+      // Prepara os botoes de acao do carrinho antes de carregar os itens.
+      configurarAcoesCarrinho();
 
       // Se estiver tudo certo, carrega os itens do carrinho.
       await carregarCarrinho();
